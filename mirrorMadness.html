@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Mirror Madness</title>
+  <!-- React + Babel + Tailwind CDN -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .tile-animation { 
+      transition: transform 4s cubic-bezier(0.2, 0, 0.2, 1); 
+    }
+    .fade-animation { 
+      transition: opacity 0.6s ease-in-out, transform 0.6s ease-in-out; 
+    }
+    .mirror-line-pulse { 
+      animation: pulse 2s infinite; 
+    }
+    .swap-highlight {
+      box-shadow: 0 0 25px rgba(251, 191, 36, 0.9);
+      animation: swapGlow 4s ease-in-out;
+      border: 2px solid rgb(251, 191, 36) !important;
+    }
+    @keyframes pulse { 
+      0%,100%{opacity:.7} 
+      50%{opacity:1} 
+    }
+    @keyframes swapGlow {
+      0% { 
+        box-shadow: 0 0 10px rgba(251, 191, 36, 0.5);
+        transform: scale(1);
+      }
+      25% { 
+        box-shadow: 0 0 30px rgba(251, 191, 36, 1);
+        transform: scale(1.05);
+      }
+      75% { 
+        box-shadow: 0 0 30px rgba(251, 191, 36, 1);
+        transform: scale(1.05);
+      }
+      100% { 
+        box-shadow: 0 0 10px rgba(251, 191, 36, 0.5);
+        transform: scale(1);
+      }
+    }
+  </style>
+</head>
+<body class="bg-slate-900 min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState } = React;
+
+    const MirrorMadness = () => {
+      const [currentLevel, setCurrentLevel] = useState(1);
+      const [gameState, setGameState] = useState('menu'); // 'menu','showing','memorizing','swapping','playing','complete','gameover'
+      const [gridSize, setGridSize] = useState(2);
+      const [numbers, setNumbers] = useState([]);
+      const [userSequence, setUserSequence] = useState([]);
+      const [showingNumbers, setShowingNumbers] = useState(true);
+      const [memorizeTimeLeft, setMemorizeTimeLeft] = useState(3);
+      const [score, setScore] = useState(0);
+      const [highScore, setHighScore] = useState(0);
+      const [memoryTimer, setMemoryTimer] = useState(null);
+      const [showingSolution, setShowingSolution] = useState(false);
+      const [isLevelComplete, setIsLevelComplete] = useState(false);
+      const [showInstructions, setShowInstructions] = useState(false);
+      const [mirrorDirection, setMirrorDirection] = useState('vertical'); // 'vertical' => side-by-side, 'horizontal' => stacked
+      const [clickedCells, setClickedCells] = useState(new Set());
+      const [isAnimating, setIsAnimating] = useState(false);
+      const [swapAnimations, setSwapAnimations] = useState([]);
+      const [fadeOut, setFadeOut] = useState(false);
+      const [showAllCorrect, setShowAllCorrect] = useState(false);
+
+      // ---- helpers
+      const generateNumbers = (size, count) => {
+        const totalCells = size * size;
+        const positions = Array.from({length: totalCells}, (_, i) => i);
+        // shuffle
+        for (let i = positions.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [positions[i], positions[j]] = [positions[j], positions[i]];
+        }
+        const out = [];
+        for (let i = 0; i < count; i++) {
+          const position = positions[i];
+          const row = Math.floor(position / size);
+          const col = position % size;
+          out.push({ value: i + 1, position, row, col, gridSize: size });
+        }
+        return out.sort((a,b) => a.value - b.value);
+      };
+
+      const generateSwaps = (nums, count = 1) => {
+        const swaps = [];
+        const pool = [...nums];
+        for (let i = 0; i < count && pool.length >= 2; i++) {
+          const i1 = Math.floor(Math.random() * pool.length);
+          const n1 = pool.splice(i1,1)[0];
+          const i2 = Math.floor(Math.random() * pool.length);
+          const n2 = pool.splice(i2,1)[0];
+          swaps.push({ number1: n1, number2: n2 });
+        }
+        return swaps;
+      };
+
+      const applySwaps = (nums, swaps) => {
+        const nn = nums.map(n => ({...n}));
+        swaps.forEach(s => {
+          const i1 = nn.findIndex(n => n.value === s.number1.value);
+          const i2 = nn.findIndex(n => n.value === s.number2.value);
+          if (i1 !== -1 && i2 !== -1) {
+            const tmp = { position: nn[i1].position, row: nn[i1].row, col: nn[i1].col };
+            nn[i1].position = nn[i2].position; nn[i1].row = nn[i2].row; nn[i1].col = nn[i2].col;
+            nn[i2].position = tmp.position; nn[i2].row = tmp.row; nn[i2].col = tmp.col;
+          }
+        });
+        return nn;
+      };
+
+      const getMirroredPosition = (row, col, size, direction) => {
+        return direction === 'vertical'
+          ? { row, col: size - 1 - col }   // flip left↔right
+          : { row: size - 1 - row, col };  // flip top↔bottom
+      };
+
+      const startMemorizationTimer = (initialTime) => {
+        if (memoryTimer) clearInterval(memoryTimer);
+        // Use the passed initialTime parameter instead of state
+        let seconds = initialTime;
+        setMemorizeTimeLeft(seconds);
+        const t = setInterval(() => {
+          seconds -= 1;
+          setMemorizeTimeLeft(seconds);
+          if (seconds <= 0) {
+            clearInterval(t);
+            setMemoryTimer(null);
+            const shouldSwap = currentLevel >= 10 && numbers.length >= 6;
+            if (shouldSwap) performSwaps();
+            else {
+              setFadeOut(true);
+              setTimeout(() => {
+                setShowingNumbers(false);
+                setGameState('playing');
+                setFadeOut(false);
+              }, 600);
+            }
+          }
+        }, 1000);
+        setMemoryTimer(t);
+      };
+
+      const performSwaps = () => {
+        setIsAnimating(true);
+        setGameState('swapping');
+        
+        // Determine swap count based on level - much more gradual
+        let swapCount = 1;
+        if (currentLevel >= 12) swapCount = 2; // 2 swaps only after level 12
+        
+        const swaps = generateSwaps(numbers, swapCount);
+        setSwapAnimations(swaps);
+        
+        // Much slower, more visible swapping animation
+        setTimeout(() => {
+          const newNumbers = applySwaps(numbers, swaps);
+          setNumbers(newNumbers);
+          setSwapAnimations([]);
+          setIsAnimating(false);
+          
+          // Longer pause after swaps complete to let players process
+          setTimeout(() => {
+            setFadeOut(true);
+            setTimeout(() => {
+              setShowingNumbers(false);
+              setGameState('playing');
+              setFadeOut(false);
+            }, 600);
+          }, 1500); // Increased from 800ms to 1500ms
+        }, 4000); // Increased from 2500ms to 4000ms for much clearer visibility
+      };
+
+      const startGame = () => {
+        setCurrentLevel(1);
+        setScore(0);
+        setGameState('showing');
+        setupLevel(1);
+      };
+
+      const setupLevel = (level) => {
+        if (memoryTimer) clearInterval(memoryTimer);
+        
+        // Much better progression: master grid sizes first, then add swaps
+        let currentGridSize, numberCount, memorizeTime;
+        
+        if (level === 1) { 
+          currentGridSize = 2; numberCount = 2; memorizeTime = 6; 
+        }
+        else if (level === 2) { 
+          currentGridSize = 2; numberCount = 3; memorizeTime = 7; 
+        }
+        else if (level === 3) { 
+          currentGridSize = 2; numberCount = 4; memorizeTime = 8; 
+        }
+        else if (level === 4) { 
+          currentGridSize = 3; numberCount = 4; memorizeTime = 10; 
+        }
+        else if (level === 5) { 
+          currentGridSize = 3; numberCount = 5; memorizeTime = 11; 
+        }
+        else if (level === 6) { 
+          currentGridSize = 3; numberCount = 6; memorizeTime = 12; 
+        }
+        else if (level === 7) { 
+          currentGridSize = 3; numberCount = 7; memorizeTime = 13; 
+        }
+        else if (level === 8) { 
+          currentGridSize = 3; numberCount = 8; memorizeTime = 14; 
+        }
+        else if (level === 9) { 
+          currentGridSize = 3; numberCount = 9; memorizeTime = 15; // Full 3x3 grid
+        }
+        else if (level === 10) { 
+          currentGridSize = 3; numberCount = 9; memorizeTime = 15; // Full 3x3 with 1 swap
+        }
+        else if (level === 11) { 
+          currentGridSize = 3; numberCount = 9; memorizeTime = 16; // Full 3x3 with 1 swap again
+        }
+        else if (level === 12) { 
+          currentGridSize = 3; numberCount = 9; memorizeTime = 16; // Full 3x3 with 2 swaps
+        }
+        else if (level === 13) { 
+          currentGridSize = 3; numberCount = 9; memorizeTime = 17; // Full 3x3 with 2 swaps again
+        }
+        else if (level === 14) { 
+          currentGridSize = 4; numberCount = 8; memorizeTime = 18; // Move to 4x4
+        }
+        else { 
+          currentGridSize = 4; 
+          numberCount = Math.min(16, 8 + Math.floor((level - 14) / 2)); 
+          memorizeTime = 18 + Math.floor((level - 14) / 2); 
+        }
+
+        const direction = level % 2 === 1 ? 'vertical' : 'horizontal';
+        setGridSize(currentGridSize);
+        setMirrorDirection(direction);
+        const newNumbers = generateNumbers(currentGridSize, numberCount);
+        setNumbers(newNumbers);
+        setUserSequence([]);
+        setClickedCells(new Set());
+        setShowingSolution(false);
+        setIsLevelComplete(false);
+        setMemorizeTimeLeft(memorizeTime);
+        setShowingNumbers(true);
+        setIsAnimating(false);
+        setSwapAnimations([]);
+        setFadeOut(false);
+        setShowAllCorrect(false);
+
+        if (level === 1) { setShowInstructions(true); setGameState('showing'); }
+        else { 
+          setGameState('memorizing'); 
+          // Pass the memorizeTime directly to avoid state timing issues
+          startMemorizationTimer(memorizeTime);
+        }
+      };
+
+      const handleInstructionsClose = () => {
+        setShowInstructions(false);
+        setGameState('memorizing');
+        // Use the current memorizeTimeLeft state value
+        startMemorizationTimer(memorizeTimeLeft);
+      };
+
+      const handleCellClick = (row, col) => {
+        if (gameState !== 'playing' || showingSolution || isAnimating) return;
+        const key = `${row}-${col}`;
+        if (clickedCells.has(key)) return;
+        setClickedCells(prev => new Set([...prev, key]));
+
+        const idx = userSequence.length;
+        const expected = numbers[idx];
+        if (!expected) return;
+        const mirrored = getMirroredPosition(expected.row, expected.col, gridSize, mirrorDirection);
+
+        if (row === mirrored.row && col === mirrored.col) {
+          const newSeq = [...userSequence, expected.value];
+          setUserSequence(newSeq);
+          if (newSeq.length === numbers.length) {
+            setShowAllCorrect(true);
+            setTimeout(() => {
+              const levelBonus = currentLevel * 150;
+              const swapBonus = currentLevel >= 10 ? 50 : 0;
+              const numberBonus = numbers.length * 25; // Bonus for more numbers
+              const newScore = score + levelBonus + swapBonus + numberBonus;
+              setScore(newScore);
+              if (newScore > highScore) {
+                setHighScore(newScore);
+              }
+              setGameState('complete');
+              setIsLevelComplete(true);
+              setTimeout(() => {
+                setIsLevelComplete(false);
+                setShowAllCorrect(false);
+                const next = currentLevel + 1;
+                setCurrentLevel(next);
+                setupLevel(next);
+              }, 2000);
+            }, 1000);
+          }
+        } else {
+          setShowingSolution(true);
+          setGameState('gameover');
+          setTimeout(() => { setGameState('menu'); }, 3000);
+        }
+      };
+
+      const getSwapAnimation = (number) => {
+        const swap = swapAnimations.find(s => s.number1.value === number.value || s.number2.value === number.value);
+        if (!swap || !isAnimating) return {};
+        const isN1 = swap.number1.value === number.value;
+        const target = isN1 ? swap.number2 : swap.number1;
+        const dRow = target.row - number.row;
+        const dCol = target.col - number.col;
+        return { 
+          transform: `translate(${dCol * 100}%, ${dRow * 100}%)`, 
+          zIndex: 10
+        };
+      };
+
+      const isSwappingNumber = (number) => {
+        return swapAnimations.some(s => s.number1.value === number.value || s.number2.value === number.value);
+      };
+
+      const gridPixelWidth = Math.max(120, gridSize * 56); // responsive width per grid
+
+      const renderGrid = (isRightSide = false) => {
+        const items = [];
+        for (let r = 0; r < gridSize; r++) {
+          for (let c = 0; c < gridSize; c++) {
+            const key = `${r}-${c}`;
+            let content = null;
+            let cls = 'bg-slate-800 border-slate-700';
+            let animStyle = {};
+
+            if (!isRightSide) {
+              const num = numbers.find(n => n.row === r && n.col === c);
+              if (num && (showingNumbers || gameState === 'memorizing' || gameState === 'swapping')) {
+                content = num.value;
+                cls = 'bg-slate-800 border-slate-700';
+                
+                if (isAnimating) { 
+                  animStyle = getSwapAnimation(num); 
+                  cls += ' tile-animation';
+                  if (isSwappingNumber(num)) {
+                    cls += ' swap-highlight';
+                  }
+                }
+              }
+            } else {
+              if (['playing','gameover','complete'].includes(gameState) || showingSolution) {
+                const clicked = clickedCells.has(key);
+                let isCorrect = false;
+                let correctNumber = null;
+                for (const num of numbers) {
+                  const pos = getMirroredPosition(num.row, num.col, gridSize, mirrorDirection);
+                  if (pos.row === r && pos.col === c) { isCorrect = true; correctNumber = num; break; }
+                }
+                if (showAllCorrect && isCorrect) {
+                  content = correctNumber.value;
+                  cls = 'bg-emerald-500/30 border-emerald-400 animate-pulse';
+                } else if (clicked && isCorrect) {
+                  content = correctNumber.value;
+                  cls = 'bg-emerald-500/20 border-emerald-400';
+                } else if (clicked && !isCorrect) {
+                  cls = 'bg-red-500/20 border-red-400 animate-pulse';
+                } else if (showingSolution && isCorrect) {
+                  content = correctNumber.value;
+                  cls = 'bg-cyan-500/20 border-cyan-400';
+                } else {
+                  cls = isCorrect && gameState === 'playing'
+                    ? 'bg-slate-800 border-slate-700 hover:bg-slate-700 hover:scale-105'
+                    : 'bg-slate-800 border-slate-700';
+                }
+              }
+            }
+
+            items.push(
+              <div
+                key={key}
+                className={`aspect-square border flex items-center justify-center text-lg font-bold transition-all duration-300 select-none cursor-pointer relative ${cls}`}
+                style={animStyle}
+                onClick={() => isRightSide && handleCellClick(r, c)}
+              >
+                {content && (
+                  <span className={`font-bold transition-all duration-300 ${fadeOut && !isRightSide ? 'opacity-0 scale-75 fade-animation' : 'opacity-100 scale-100 text-cyan-400'}`}>
+                    {content}
+                  </span>
+                )}
+                {isAnimating && isRightSide && (<div className="absolute inset-0 bg-yellow-500/20 rounded animate-pulse"></div>)}
+              </div>
+            );
+          }
+        }
+        return items;
+      };
+
+      // --- Screens
+      if (gameState === 'menu') {
+        return (
+          <div className="min-h-screen flex flex-col items-center justify-center p-4">
+            <div className="w-full max-w-md text-center">
+              <h1 className="text-4xl font-bold bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent mb-4">Mirror Madness</h1>
+              <p className="text-slate-400 text-lg mb-8">Memorize, mirror, and match the sequence!</p>
+
+              <div className="bg-slate-800 rounded-lg p-6 mb-6 border border-slate-700 text-left">
+                <h3 className="text-white font-bold mb-4">How to Play</h3>
+                <ul className="text-slate-300 text-sm space-y-2 list-disc pl-5">
+                  <li>Study the numbers on the left grid</li>
+                  <li>Watch for tile swaps (Level 3+) - they glow yellow!</li>
+                  <li>Tap the mirrored positions on the right grid</li>
+                  <li>Follow the sequence order (1, 2, 3...)</li>
+                  <li>More numbers = higher scores!</li>
+                </ul>
+              </div>
+
+              <div className="flex justify-between items-center mb-6 text-sm">
+                <div className="text-slate-400">High Score: <span className="text-white font-bold">{highScore}</span></div>
+                <div className="text-slate-400">Current: <span className="text-white font-bold">{score}</span></div>
+              </div>
+
+              <button onClick={startGame}
+                className="w-full bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 text-white px-8 py-4 rounded-xl font-bold text-xl transition-all duration-200 hover:scale-105 shadow-lg">
+                Start Game
+              </button>
+            </div>
+          </div>
+        );
+      }
+
+      // Game Screen
+      return (
+        <div className="min-h-screen flex flex-col items-center justify-center p-4">
+          <div className="w-full max-w-xl">
+            {/* Instructions */}
+            {showInstructions && (
+              <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-sm flex items-center justify-center z-20">
+                <div className="bg-slate-800 border border-slate-600 rounded-xl p-6 mx-4 max-w-sm shadow-2xl text-center">
+                  <h3 className="text-white font-bold text-lg mb-3">Mirror Madness</h3>
+                  <p className="text-slate-300 text-sm leading-relaxed mb-4">
+                    Memorize the numbers on the left grid. Then tap the mirrored positions on the right grid in sequence order. Watch for glowing tile swaps!
+                  </p>
+                  <button onClick={handleInstructionsClose}
+                    className="bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 text-white px-6 py-3 rounded-lg font-semibold transition-all duration-200 hover:scale-105">
+                    Got it!
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Header */}
+            <div className="flex items-center justify-between mb-6">
+              <button onClick={() => setGameState('menu')} className="text-slate-400 hover:text-white transition-colors">← Menu</button>
+              <h1 className="text-xl font-bold text-white">Mirror Madness</h1>
+              <div className="w-8"></div>
+            </div>
+
+            {/* Info */}
+            <div className="flex justify-between items-center mb-6 text-sm">
+              <div className="text-slate-400">
+                Level <span className="text-white font-bold">{currentLevel}</span>
+                {currentLevel >= 10 && <span className="text-yellow-400 ml-1">⚡</span>}
+                <div className="text-xs text-slate-500">{numbers.length} numbers</div>
+              </div>
+              <div className="text-slate-400">Score: <span className="text-white font-bold">{score}</span></div>
+              <div className="text-slate-400">High: <span className="text-white font-bold">{highScore}</span></div>
+            </div>
+
+            {/* Layout container switches by mirrorDirection */}
+            <div key={`layout-${mirrorDirection}-${currentLevel}`} className="w-full flex justify-center mb-6">
+              {mirrorDirection === 'horizontal' ? (
+                // Stacked (top/bottom) for horizontal mirror
+                <div className="flex flex-col items-center gap-4">
+                  {/* Top Grid */}
+                  <div className="flex flex-col items-center">
+                    <div className="text-slate-400 text-xs mb-2">Original</div>
+                    <div className="grid gap-1" style={{ gridTemplateColumns: `repeat(${gridSize}, minmax(0, 1fr))`, width: gridPixelWidth }}>
+                      {renderGrid(false)}
+                    </div>
+                  </div>
+
+                  {/* Mirror Line */}
+                  <div className="flex flex-col items-center">
+                    <div className={`h-0.5 w-32 bg-gradient-to-r from-purple-500 to-pink-500 ${isAnimating ? 'mirror-line-pulse' : ''}`}></div>
+                    <div className="text-purple-400 text-xs mt-1">Horizontal Mirror</div>
+                  </div>
+
+                  {/* Bottom Grid */}
+                  <div className="flex flex-col items-center">
+                    <div className="text-slate-400 text-xs mb-2">Mirror</div>
+                    <div className="grid gap-1" style={{ gridTemplateColumns: `repeat(${gridSize}, minmax(0, 1fr))`, width: gridPixelWidth }}>
+                      {renderGrid(true)}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                // Side-by-side for vertical mirror
+                <div className="flex items-center gap-6">
+                  {/* Left Grid */}
+                  <div className="flex flex-col items-center">
+                    <div className="text-slate-400 text-xs mb-2">Original</div>
+                    <div className="grid gap-1" style={{ gridTemplateColumns: `repeat(${gridSize}, minmax(0, 1fr))`, width: gridPixelWidth }}>
+                      {renderGrid(false)}
+                    </div>
+                  </div>
+
+                  {/* Mirror Line */}
+                  <div className="flex flex-col items-center">
+                    <div className={`w-0.5 h-32 bg-gradient-to-b from-purple-500 to-pink-500 ${isAnimating ? 'mirror-line-pulse' : ''}`}></div>
+                    <div className="text-purple-400 text-xs mt-2">Vertical Mirror</div>
+                  </div>
+
+                  {/* Right Grid */}
+                  <div className="flex flex-col items-center">
+                    <div className="text-slate-400 text-xs mb-2">Mirror</div>
+                    <div className="grid gap-1" style={{ gridTemplateColumns: `repeat(${gridSize}, minmax(0, 1fr))`, width: gridPixelWidth }}>
+                      {renderGrid(true)}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Messages */}
+            <div className="text-center min-h-[80px] flex flex-col justify-center">
+              {gameState === 'memorizing' && (
+                <div>
+                  <div className="text-amber-400 font-bold text-2xl mb-2">{memorizeTimeLeft}s</div>
+                  <div className="text-slate-400">Study the left grid! {currentLevel >= 10 && <span className="text-yellow-400">Watch for glowing swaps!</span>}</div>
+                </div>
+              )}
+
+              {gameState === 'swapping' && (
+                <div>
+                  <div className="text-yellow-400 font-bold text-xl mb-2">🔄 Tiles Swapping!</div>
+                  <div className="text-slate-400 text-sm">Watch carefully - {swapAnimations.length} swap{swapAnimations.length > 1 ? 's' : ''} happening...</div>
+                </div>
+              )}
+
+              {gameState === 'playing' && !showingSolution && (
+                <div>
+                  <div className="text-slate-400 mb-2">
+                    Tap number <span className="text-purple-400 font-bold text-xl">{userSequence.length + 1}</span> on the right grid
+                  </div>
+                  <div className="text-xs text-slate-500">
+                    {mirrorDirection === 'vertical' ? 'Flipped horizontally' : 'Flipped vertically'}
+                    {currentLevel >= 10 && <span className="text-yellow-400"> • Tiles were swapped!</span>}
+                  </div>
+                </div>
+              )}
+
+              {isLevelComplete && (
+                <div className="text-emerald-400 font-bold text-xl animate-bounce">
+                  Level {currentLevel} Complete! +{currentLevel * 150 + (currentLevel >= 10 ? 50 : 0) + (numbers.length * 25)}
+                </div>
+              )}
+
+              {showingSolution && (
+                <div>
+                  <div className="text-red-400 font-semibold text-lg mb-2">Game Over!</div>
+                  <div className="text-slate-400 text-sm">Final Score: <span className="text-white font-bold">{score}</span></div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<MirrorMadness />);
+  </script>
+</body>
+</html>
